@@ -4,8 +4,13 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
+
+#define SERTVER_PORT 8080
+#define SERVER_IP "127.0.0.1"
+
+#define BUFFER_SIZE 2 * 1024 * 1024
+
 
 
 /*
@@ -41,75 +46,95 @@ char *util_generate_random_data(unsigned int size) {
 
 
 int main() {
-    //Read the created file
-    FILE *file = util_generate_random_data(2 * 1024 * 1024);
-    
+    fprintf(stdout, "Starting Sender...\n");
 
-    //Create a TCP socket between the sender and the receiver
-    int sockfd;
-    struct sockaddr_in sender_addr, receiver_addr;
+    
+    // The variable to store the socket file descriptor.
+    int sock = -1;
+
+    // The variable to store the server's address.
+    struct sockaddr_in receiver_addr;
+
+    // Reset the receiver_addr to zero
+    memset(&receiver_addr, 0, sizeof(receiver_addr));
+
 
     // Create socket
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        perror("Socket creation failed");
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock <= 0) {
+        perror("socket(2)");
         exit(EXIT_FAILURE);
     }
 
-    // Set up sender address
-    memset(&sender_addr, 0, sizeof(sender_addr));
-    sender_addr.sin_family = AF_INET;
-    sender_addr.sin_addr.s_addr = INADDR_ANY;
-    sender_addr.sin_port = htons(8080);
-
-    // Bind socket to sender address
-    if (bind(sockfd, (struct sockaddr *)&sender_addr, sizeof(sender_addr)) < 0) {
-        perror("Binding failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Set up receiver address
-    memset(&receiver_addr, 0, sizeof(receiver_addr));
-    receiver_addr.sin_family = AF_INET;
-    receiver_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    receiver_addr.sin_port = htons(8080);
-
-    // Connect to receiver
-    if (connect(sockfd, (struct sockaddr *)&receiver_addr, sizeof(receiver_addr)) < 0) {
-        perror("Connection failed");
-        exit(EXIT_FAILURE);
-    }
-
-    //Send the file
-    // Send the file
-    if (send(sockfd, file, sizeof(file), 0) < 0) {
-        perror("File sending failed");
+    // Conver the IP address from text to binary form
+    if (inet_pton(AF_INET, SERVER_IP, &receiver_addr.sin_addr) <= 0) {
+        perror("inet_pton(3)");
+        close(sock);
         exit(EXIT_FAILURE);
     }
     
+    // Set the server's address family to AF_INET (IPv4).
+    receiver_addr.sin_family = AF_INET;
+    // Set the server's port number.
+    receiver_addr.sin_port = htons(SERTVER_PORT);
 
-    //User decision: Send the file again or close the connection
+    fprintf(stdout, "Waiting for TCP connection...\n");
+    // Connect to receiver
+    if (connect(sock, (struct sockaddr *)&receiver_addr, sizeof(receiver_addr)) < 0) {
+        perror("Connect(2)");
+        close(sock);
+        exit(EXIT_FAILURE);
+    }
+
+    fprintf(stdout, "Receiver connected, beginning to receive file...\n");
+
     char decision;
-    printf("Do you want to send the file again? (y/n): ");
-    scanf("%c", &decision);
-    if (decision == 'y') {
-        // Send the file again
-        if (send(sockfd, file, sizeof(file), 0) < 0) {
-            perror("File sending failed");
+    do {
+        
+        //Create file
+        char *file = util_generate_random_data(BUFFER_SIZE);
+        // Send the file
+        int bytes_sent = send(sock, file, sizeof(BUFFER_SIZE), 0);
+        if (bytes_sent <= 0) {
+            perror("send(2)");
+            close(sock);
+            free(file);
             exit(EXIT_FAILURE);
         }
-    }
+    
+    fprintf(stdout, "File sent.\n");
+    fprintf(stdout, "Waiting for Receiver response...\n");
+
+        //Receive the file
+        char rec_buffer[1024];
+        int bytes_received = recv(sock, rec_buffer, sizeof(rec_buffer), 0);
+        if (bytes_received <= 0) {
+            perror("recv(2)");
+            close(sock);
+            free(file);
+            exit(EXIT_FAILURE);
+        }
+
+        //User decision: Send the file again or close the connection
+        fprintf(stdout, "Do you want to send the file again? (y/n): ");
+        scanf("%c", &decision);
+
+        } while (decision == 'Y' || decision == 'y');
+        
 
     //Send an exit message to the receiver
     char *exit_message = "exit";
-    if (send(sockfd, exit_message, strlen(exit_message), 0) < 0) {
-        perror("Exit message sending failed");
+    if (send(sock, exit_message, strlen(exit_message) + 1, 0) < 0) {
+        perror("send(2)");
+        close(sock);
         exit(EXIT_FAILURE);
     }
 
     //Close the TCP connection
-    close(sockfd);
-
+    close(sock);
+    fprintf(stdout, "Connection closed\n");
+    fprintf(stdout, "Sender end\n");
+    
     return 0;
 }
 
