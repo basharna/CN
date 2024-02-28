@@ -5,9 +5,9 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 
 #define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 8080
 #define MAX_CLIENTS 1
 #define BUFFER_SIZE 2 * 1024 * 1024
 
@@ -16,11 +16,30 @@ typedef struct {
     double bandwidth;
 } FileStats;
 
-int main() {
-    fprintf(stdout, "Starting Receiver...\n");
+int main(int argc, char *argv[]) {
 
-    double total_time_taken = 0;
-    double total_bandwidth = 0;
+    int server_port;
+    char *algorithm;
+
+    if(argc != 5){
+        fprintf(stderr, "Usage: %s -p <server_port> -algo <algorithm>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    for (size_t i = 0; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-p") == 0)
+        {
+            server_port = atoi(argv[i+1]);
+        }
+        else if (strcmp(argv[i], "-algo") == 0)
+        {
+            algorithm = argv[i+1];
+        }
+    }
+
+
+    fprintf(stdout, "Starting Receiver...\n");
 
     // The variable to store the socket file descriptor.
     int sock = -1;
@@ -50,6 +69,13 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
+    // Set the congestion control algorithm.
+    if(setsockopt(sock, IPPROTO_TCP, TCP_CONGESTION, algorithm, strlen(algorithm)) < 0){
+        perror("setsockopt(2)");
+        close(sock);
+        exit(EXIT_FAILURE);
+    }
+
      // Set the receiver's address family to AF_INET (IPv4).
     receiver_addr.sin_family = AF_INET;
     // Set the receiver's address.
@@ -59,7 +85,7 @@ int main() {
         exit(EXIT_FAILURE);
     }
     // Set the receiver's port number.
-    receiver_addr.sin_port = htons(SERVER_PORT);
+    receiver_addr.sin_port = htons(server_port);
 
     // Bind the socket to the receiver's address.
     if (bind(sock, (struct sockaddr *)&receiver_addr, sizeof(receiver_addr)) < 0){
@@ -75,30 +101,32 @@ int main() {
         exit(EXIT_FAILURE);
     }
     fprintf(stdout, "Waiting for TCP connection...\n");
+    
+    //accept connection from an incoming client
+    int sender_sock = accept(sock, (struct sockaddr *)&sender_addr, &sender_addr_len);
+    if (sender_sock < 0){
+        perror("accept(2)");
+        close(sock);
+        exit(EXIT_FAILURE);
+    }
+    fprintf(stdout, "Connection accepted from %s:%d\n", inet_ntoa(sender_addr.sin_addr), ntohs(sender_addr.sin_port));
 
+    char received_data[BUFFER_SIZE];
     FileStats *fileStats = NULL;
     int fileStatsCount = 0;
-    
-    while (1)
-    {
-        //accept connection from an incoming client
-        int sender_sock = accept(sock, (struct sockaddr *)&sender_addr, &sender_addr_len);
-        if (sender_sock < 0){
-            perror("accept(2)");
-            close(sock);
-            free(fileStats);
-            exit(EXIT_FAILURE);
-        }
-        fprintf(stdout, "Connection accepted from %s:%d\n", inet_ntoa(sender_addr.sin_addr), ntohs(sender_addr.sin_port));
+    double total_time_taken = 0;
+    double total_bandwidth = 0;
 
-        char received_data[BUFFER_SIZE];
-        do{    
-            //start the timer
-            clock_t start = clock();
+    while(1){
+        
+        clock_t start, end;
+        int total_bytes_received = 0;
 
+        //start the timer
+        start = clock();
+        do{
             // Receive the file
-            
-            int bytes_received = recv(sender_sock, received_data, sizeof(received_data), 0);
+            int bytes_received = recv(sender_sock, received_data, BUFFER_SIZE, 0);
             if (bytes_received < 0){
                 perror("recv(2)");
                 close(sender_sock);
@@ -111,51 +139,63 @@ int main() {
                 close(sock);
                 break;
             }
-            fprintf(stdout, "File received.\n");
+            total_bytes_received += bytes_received;
 
-            //measure the time in milliseconds taken to receive the file
-            clock_t end = clock();
-            double time_taken = ((double)(end - start) * 1000) / CLOCKS_PER_SEC;
-            total_time_taken += time_taken;
+            // Check if received_data contains the end-of-file marker
+            if (total_bytes_received == BUFFER_SIZE){
+                // Stop the clock
+                end = clock();
 
-            //calculate the bandwidth in MB/s
-            double bandwidth = (sizeof(received_data) / time_taken) / (1024 * 1024);
-            total_bandwidth += bandwidth;
+                //measure the time in milliseconds taken to receive the file
+                double time_taken = ((double)(end - start)) / (CLOCKS_PER_SEC / 1000);
+                total_time_taken += time_taken;
 
-            fileStatsCount++;
-            fileStats = realloc(fileStats, fileStatsCount * sizeof(FileStats));
-            if (fileStats == NULL) {
-                perror("realloc(3)");
-                close(sender_sock);
-                close(sock);
-                free(fileStats);
-                exit(EXIT_FAILURE);
+                //calculate the bandwidth in MB/s
+                double bandwidth = (BUFFER_SIZE / (time_taken / 1000)) / (1024 * 1024);
+                total_bandwidth += bandwidth;
+
+                fileStatsCount++;
+                fileStats = realloc(fileStats, fileStatsCount * sizeof(FileStats));
+                if (fileStats == NULL) {
+                    perror("realloc(3)");
+                    close(sender_sock);
+                    close(sock);
+                    free(fileStats);
+                    exit(EXIT_FAILURE);
+                }
+                //store the file statistics
+                fileStats[fileStatsCount - 1].time_taken = time_taken;
+                fileStats[fileStatsCount - 1].bandwidth = bandwidth;
+
+                // Send acknowledgment back to the sender
+                send(sender_sock, "ACK", 3, 0);
+
+                break; 
             }
 
-            int bytes_sent = send(sender_sock, "File received", sizeof("File received"), 0);
-            if (bytes_sent < 0){
-                perror("send(2)");
-                close(sender_sock);
-                close(sock);
-                free(fileStats);
-                exit(EXIT_FAILURE);
-            }
+        } while (1);
 
-            fprintf(stdout, "Waiting for Sender response...\n");
-
-        } while (strcmp(received_data, "exit") != 0);
-
-        fprintf(stdout, "Sender sent exit message.\n");
-        
-        // Print the file statistics
-        fprintf(stdout, "-----------------------\n");
-        fprintf(stdout, "File Statistics:\n");
-        for (size_t i = 0; i <= fileStatsCount; i++)
-        {
-            double bandwidth = fileStats[i].bandwidth;
-            double time = fileStats[i].time_taken;
-            fprintf(stdout, "Run %zu: Time = %.2f ms, Speed = %.2f MB/s", i + 1, time, bandwidth);
+        if(strcmp(received_data, "exit") == 0){
+            fprintf(stdout, "Sender sent exit message.\n");
+            close(sender_sock);
+            close(sock);
+            break;
         }
+
+        fprintf(stdout, "File received. Bytes received: %d\n", total_bytes_received);
+        
+        fprintf(stdout, "Waiting for Sender response...\n");
+    }
+    
+    // Print the file statistics
+    fprintf(stdout, "-----------------------\n");
+    fprintf(stdout, "File Statistics:\n");
+    for (size_t i = 0; i < fileStatsCount; i++)
+    {
+        double bandwidth = fileStats[i].bandwidth;
+        double time = fileStats[i].time_taken;
+        fprintf(stdout, "Run %zu: Time = %.2f ms, Speed = %.2f MB/s\n", i + 1, time, bandwidth);
+    }
 
         // Print the average file statistics
         fprintf(stdout, "Average time: %.2f ms\n", total_time_taken / fileStatsCount);
@@ -164,7 +204,7 @@ int main() {
         fprintf(stdout, "-----------------------\n");
         
 
-    }
+    
     fprintf(stdout, "Receiver end\n");
     free(fileStats);
     return 0;

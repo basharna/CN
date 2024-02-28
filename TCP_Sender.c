@@ -5,47 +5,39 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 
-#define SERTVER_PORT 8080
-#define SERVER_IP "127.0.0.1"
 
 #define BUFFER_SIZE 2 * 1024 * 1024
 
+int main(int argc, char *argv[]) {
+
+    char *server_ip;
+    char *algorithm;
+    int server_port;
 
 
-/*
-* @brief A random data generator function based on srand() and rand().
-* @param size The size of the data to generate (up to 2^32 bytes).
-* @return A pointer to the buffer.
-*/
-char *util_generate_random_data(unsigned int size) {
-    char *buffer = NULL;
-    // Argument check.
-    if (size == 0){
-        return NULL;
+    if(argc != 7){
+        fprintf(stderr, "Usage: %s -ip <server_ip> -p <server_port> -algo <algorithm>\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
 
-    buffer = (char *)calloc(size, sizeof(char));
-
-    // Error checking.
-    if (buffer == NULL){
-        return NULL;
+    for (size_t i = 0; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-ip") == 0)
+        {
+            server_ip = argv[i+1];
+        }
+        else if (strcmp(argv[i], "-p") == 0)
+        {
+            server_port = atoi(argv[i+1]);
+        }else if (strcmp(argv[i], "-algo") == 0)
+        {
+            algorithm = argv[i+1];
+        }
     }
     
-    // Randomize the seed of the random number generator.
-    srand(time(NULL));
 
-    for (unsigned int i = 0; i < size; i++){
-        *(buffer + i) = ((unsigned int)rand() % 256);
-    }
-    
-    return buffer;
-}
-
-
-
-
-int main() {
     fprintf(stdout, "Starting Sender...\n");
 
     
@@ -58,6 +50,30 @@ int main() {
     // Reset the receiver_addr to zero
     memset(&receiver_addr, 0, sizeof(receiver_addr));
 
+    // buffer to store the file
+    char *file_data = (char *)calloc(BUFFER_SIZE, sizeof(char));
+
+    // Open the file 
+    FILE *file = fopen("data.txt", "r");
+    if (file == NULL) {
+        perror("fopen(3)");
+        free(file_data);
+        exit(EXIT_FAILURE);
+    }
+
+    // read the file into a buffer
+    int bytes_read;
+    if ((bytes_read = fread(file_data, sizeof(char), BUFFER_SIZE, file)) != BUFFER_SIZE) {
+        perror("fread(3)");
+        fclose(file);
+        free(file_data);
+        exit(EXIT_FAILURE);
+    }
+    fprintf(stdout, "bytes read: %d.\n", bytes_read);
+
+    // Close the file
+    fclose(file);
+
 
     // Create socket
     sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -67,8 +83,15 @@ int main() {
     }
 
     // Conver the IP address from text to binary form
-    if (inet_pton(AF_INET, SERVER_IP, &receiver_addr.sin_addr) <= 0) {
+    if (inet_pton(AF_INET, server_ip, &receiver_addr.sin_addr) <= 0) {
         perror("inet_pton(3)");
+        close(sock);
+        exit(EXIT_FAILURE);
+    }
+
+    // Set the congestion control algorithm.
+    if(setsockopt(sock, IPPROTO_TCP, TCP_CONGESTION, algorithm, strlen(algorithm)) < 0){
+        perror("setsockopt(2)");
         close(sock);
         exit(EXIT_FAILURE);
     }
@@ -76,7 +99,7 @@ int main() {
     // Set the server's address family to AF_INET (IPv4).
     receiver_addr.sin_family = AF_INET;
     // Set the server's port number.
-    receiver_addr.sin_port = htons(SERTVER_PORT);
+    receiver_addr.sin_port = htons(server_port);
 
     fprintf(stdout, "Waiting for TCP connection...\n");
     // Connect to receiver
@@ -91,36 +114,36 @@ int main() {
     char decision;
     do {
         
-        //Create file
-        char *file = util_generate_random_data(BUFFER_SIZE);
         // Send the file
-        int bytes_sent = send(sock, file, sizeof(BUFFER_SIZE), 0);
+        int bytes_sent = send(sock, file_data, BUFFER_SIZE, 0);
         if (bytes_sent <= 0) {
             perror("send(2)");
             close(sock);
-            free(file);
+            free(file_data);
             exit(EXIT_FAILURE);
         }
     
-    fprintf(stdout, "File sent.\n");
-    fprintf(stdout, "Waiting for Receiver response...\n");
+        fprintf(stdout, "File sent.\n");
+        fprintf(stdout, "Bytes sent: %d\n", bytes_sent);
+        fprintf(stdout, "Waiting for Receiver response...\n");
 
-        //Receive the file
+        //Receive response from the receiver
         char rec_buffer[1024];
-        int bytes_received = recv(sock, rec_buffer, sizeof(rec_buffer), 0);
+        int bytes_received = recv(sock, rec_buffer, 1024, 0);
         if (bytes_received <= 0) {
             perror("recv(2)");
             close(sock);
-            free(file);
+            free(file_data);
             exit(EXIT_FAILURE);
         }
 
         //User decision: Send the file again or close the connection
         fprintf(stdout, "Do you want to send the file again? (y/n): ");
-        scanf("%c", &decision);
+        scanf(" %c", &decision);
 
         } while (decision == 'Y' || decision == 'y');
         
+    free(file_data);
 
     //Send an exit message to the receiver
     char *exit_message = "exit";
