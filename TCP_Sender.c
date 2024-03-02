@@ -146,7 +146,7 @@ int main(int argc, char *argv[]) {
     free(file_data);
 
     //Send an exit message to the receiver
-    char *exit_message = "exit";
+    const char *exit_message = "exit";
     if (send(sock, exit_message, strlen(exit_message) + 1, 0) < 0) {
         perror("send(2)");
         close(sock);
