@@ -12,7 +12,24 @@
 #define SERVER_IP "127.0.0.1"
 #define BUFFER_SIZE 2 * 1024 * 1024
 #define MAX_WAIT_TIME 2
-#define MAX_PACKET_SIZE 1500
+#define CHUNK_SIZE 1024
+#define SYN 1
+#define SYN_ACK 3
+#define ACK 2
+#define FIN 4
+#define FIN_ACK 6
+#define PUSH 16
+
+/*
+0
+0
+0
+0 PUSH
+0
+0 FIN
+0 ACK
+0 SYN
+*/
 
 unsigned short int calculate_checksum(void *data, unsigned int bytes)
 {
@@ -36,10 +53,10 @@ unsigned short int calculate_checksum(void *data, unsigned int bytes)
 // RUDP header
 typedef struct
 {
-    uint8_t length;
-    uint16_t checksum;
-    uint8_t sequence_number;
-    uint8_t acknowledgment_number;
+    uint16_t length;
+    uint32_t checksum;
+    uint16_t sequence_number;
+    uint16_t acknowledgment_number;
     uint8_t flags;
 } RUDP_Header;
 
@@ -47,7 +64,7 @@ typedef struct
 typedef struct
 {
     RUDP_Header header;
-    char data[BUFFER_SIZE];
+    char data[CHUNK_SIZE];
 } RUDP_Packet;
 
 // A struct that represents RUDP Socket
@@ -60,39 +77,8 @@ typedef struct
 } RUDP_Socket;
 
 int rudp_close(RUDP_Socket *);
-
-int send_large_packet(RUDP_Socket *sockfd, const RUDP_Packet *data_packet)
-{
-    int data_size = data_packet->header.length;
-    int num_chunks = (data_size + MAX_PACKET_SIZE - 1) / MAX_PACKET_SIZE;
-    int bytes_sent = 0;
-
-    for (int i = 0; i < num_chunks; i++)
-    {
-        RUDP_Packet packet;
-        packet.header.length = (uint16_t)sizeof(packet.data);
-        packet.header.checksum = data_packet->header.checksum; // Calculate checksum if needed
-        packet.header.flags = data_packet->header.flags;       // Preserve flags from original packet
-
-        int chunk_size = (i == num_chunks - 1) ? (data_size - i * MAX_PACKET_SIZE) : MAX_PACKET_SIZE;
-        memcpy(packet.data, data_packet->data + i * MAX_PACKET_SIZE, chunk_size);
-
-        if (i == num_chunks - 1)
-        {
-            packet.header.flags |= 0x01; // Set the last chunk flag
-        }
-
-        if (sendto(sockfd->socket_fd, &packet, sizeof(packet.header) + chunk_size, 0, (struct sockaddr *)&(sockfd->dest_addr), sizeof(sockfd->dest_addr)) < 0)
-        {
-            perror("sendto(2)");
-            return 0;
-        }
-        bytes_sent += chunk_size;
-    }
-
-    return bytes_sent;
-}
-
+int rudp_send(RUDP_Socket *, uint8_t, char *, size_t);
+int rudp_receive(RUDP_Socket *, RUDP_Packet *);
 // Allocates a new structure for the RUDP socket (contains basic information about the socket itself).
 // Also creates a UDP socket as a baseline for the RUDP.
 // isServer means that this socket acts like a server. If set to server socket, it also binds the socket to a specific port.
@@ -166,6 +152,7 @@ int rudp_connect(RUDP_Socket *sockfd, const char *dest_ip, unsigned short int de
 {
     if (sockfd->isServer || sockfd->isConnected)
     {
+        fprintf(stderr, "Socket is already connected.\n");
         return 0;
     }
     memset(&sockfd->dest_addr, 0, sizeof(sockfd->dest_addr));
@@ -177,48 +164,41 @@ int rudp_connect(RUDP_Socket *sockfd, const char *dest_ip, unsigned short int de
     }
     sockfd->dest_addr.sin_port = htons(dest_port);
 
-    // send syn ack
-    RUDP_Header header;
-    header.length = 0;
-    header.checksum = 0;
-    header.flags = 1;
+    // send syn
+    printf("Sending SYN packet.\n");
+    int sent = rudp_send(sockfd, SYN, NULL, 0);
+    if (sent == -1)
+    {
+        printf("Failed to send SYN packet.\n");
+        return 0;
+    }
+
     RUDP_Packet packet;
-    packet.header = header;
-
-    // if(send_in_chunks(sockfd, &packet) < 0)
-    // {
-    //     perror("sendto(2)");
-    //     return 0;
-    // }
-
-    if (sendto(sockfd->socket_fd, &header, sizeof(header), 0, (struct sockaddr *)&sockfd->dest_addr, sizeof(sockfd->dest_addr)) < 0)
+    int recv = rudp_receive(sockfd, &packet);
+    if (recv == -1)
     {
-        perror("sendto(2)");
+        printf("Failed to receive SYN-ACK packet.\n");
         return 0;
     }
-
-    // receive syn ack
-    int recv_size = recv(sockfd->socket_fd, &packet, sizeof(packet), 0);
-    if (recv_size < 0)
+    if (packet.header.flags == SYN_ACK)
     {
-        perror("recv(2)");
-        return 0;
-    }
-    if (packet.header.flags == 3)
-    {
+        printf("Received SYN-ACK packet.\n");
+        // send ack
+        printf("Sending ACK packet.\n");
+        sent = rudp_send(sockfd, ACK, NULL, 0);
+        if (sent == -1)
+        {
+            return 0;
+        }
         sockfd->isConnected = true;
-        return 1;
     }
-
-    // send ack
-    header.flags = 2;
-    packet.header = header;
-    if (sendto(sockfd->socket_fd, &packet, sizeof(packet), 0, (struct sockaddr *)&sockfd->dest_addr, sizeof(sockfd->dest_addr)) < 0)
+    else
     {
-        perror("sendto(2)");
+        printf("Received unexpected packet.\n");
+        printf("Received %d\n", packet.header.flags);
         return 0;
     }
-    return 0;
+    return 1;
 }
 
 // Accepts incoming connection request and completes the handshake, returns 0 on failure and 1 on success.
@@ -232,79 +212,181 @@ int rudp_accept(RUDP_Socket *sockfd)
 
     printf("Waiting for connection...\n");
 
-    struct sockaddr_in client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
-
     RUDP_Packet packet;
-    int recv_size = recvfrom(sockfd->socket_fd, &packet, sizeof(packet), 0, (struct sockaddr *)&client_addr, &client_addr_len);
-    if (recv_size < 0)
+    int recv = rudp_receive(sockfd, &packet);
+    if (recv == -1)
     {
-        perror("recvfrom(2)");
         return 0;
     }
-    // print header flags
+
     //  if received syn send back syn ack
-    if (packet.header.flags == 1)
+    if (packet.header.flags == SYN)
     {
         printf("Received SYN packet.\n");
-        packet.header.flags = 3;
-        if (sendto(sockfd->socket_fd, &packet.header, sizeof(packet.header), 0, (struct sockaddr *)&client_addr, client_addr_len) < 0)
+        // send syn ack
+        printf("Sending SYN-ACK packet.\n");
+        int sent = rudp_send(sockfd, SYN_ACK, NULL, 0);
+        if (sent == -1)
         {
-            perror("sendto(2)");
+            printf("Failed to send SYN-ACK packet.\n");
             return 0;
         }
     }
 
-    sockfd->isConnected = true;
-    sockfd->dest_addr = client_addr;
-    printf("Connected to %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+    // receive ack
+    recv = rudp_receive(sockfd, &packet);
+    if (recv == -1)
+    {
+        printf("Failed to receive ACK packet.\n");
+        return 0;
+    }
+
+    if (packet.header.flags == ACK)
+    {
+        printf("Received ACK packet.\n");
+        sockfd->isConnected = true;
+    }
+    else
+    {
+        printf("Received unexpected packet.\n");
+        return 0;
+    }
+    printf("Connected to %s:%d\n", inet_ntoa(sockfd->dest_addr.sin_addr), ntohs(sockfd->dest_addr.sin_port));
     return 1;
 }
 
 // Receives data from the other side and put it into the buffer.
 // Returns the number of received bytes on success, 0 if got FIN packet (disconnect), and -1 on error.
 // Fails if called when the socket is disconnected.
-int rudp_recv(RUDP_Socket *sockfd, void *buffer, unsigned int buffer_size)
+int rudp_receive(RUDP_Socket *rudp_socket, RUDP_Packet *packet)
 {
-    if (!sockfd->isConnected)
+    size_t total_received = 0;
+    socklen_t addr_len = sizeof(rudp_socket->dest_addr);
+
+    if (rudp_socket->isServer)
     {
-        return -1;
+
+        while (total_received < BUFFER_SIZE)
+        {
+            int bytes_received = recvfrom(rudp_socket->socket_fd, packet, sizeof(RUDP_Packet), 0, (struct sockaddr *)&rudp_socket->dest_addr, &addr_len);
+            if (bytes_received < 0)
+            {
+                printf("%s:%d\n", inet_ntoa(rudp_socket->dest_addr.sin_addr), ntohs(rudp_socket->dest_addr.sin_port));
+                perror("recvfrom");
+                return -1;
+            }
+            // printf("Received %d \n", bytes_received);
+            // printf("sizeof(RUDP_header) %ld \n", sizeof(RUDP_Header));
+
+            size_t data_size = bytes_received - sizeof(RUDP_Header);
+
+            if (packet->header.flags == SYN || packet->header.flags == SYN_ACK || packet->header.flags == ACK || packet->header.flags == FIN_ACK)
+            {
+                // Ignore control packets (SYN, SYN-ACK, ACK, FIN)
+                break;
+            }
+            else if (packet->header.flags == FIN)
+            {
+                return 0;
+            }
+            else
+            {
+                // Check if the received packet is corrupted
+                unsigned short int checksum = calculate_checksum(packet->data, data_size);
+                if (checksum != packet->header.checksum)
+                {
+                    printf("Checksum failed for sequence number %d: %d\n", packet->header.sequence_number, checksum);
+                    printf("seq %d, len %d, chek %d, ack %d, f %d\n", packet->header.sequence_number, packet->header.length, packet->header.checksum, packet->header.acknowledgment_number, packet->header.flags);
+                    continue;
+                }
+            }
+
+            total_received += data_size;
+
+            // Check if all data has been received
+            if (total_received >= BUFFER_SIZE)
+            {
+                break;
+            }
+        }
     }
-    int recv_size = recv(sockfd->socket_fd, buffer, buffer_size, 0);
-    if (recv_size < 0)
+    else
     {
-        perror("recv(2)");
-        return -1;
+        // only receive connection packets
+        int bytes_received = recvfrom(rudp_socket->socket_fd, packet, sizeof(RUDP_Packet), 0, (struct sockaddr *)&rudp_socket->dest_addr, &addr_len);
+        if (bytes_received < 0)
+        {
+            perror("recvfrom");
+            return -1;
+        }
+        if (packet->header.flags == SYN || packet->header.flags == SYN_ACK || packet->header.flags == ACK || packet->header.flags == FIN_ACK)
+        {
+            return bytes_received;
+        }
+        else if (packet->header.flags == FIN)
+        {
+            return 0;
+        }
     }
-    if (recv_size == 0)
-    {
-        sockfd->isConnected = false;
-        return 0;
-    }
-    return recv_size;
+    return total_received;
 }
 
 // Sends data stores in buffer to the other side.
 // Returns the number of sent bytes on success, 0 if got FIN packet (disconnect), and -1 on error.
 // Fails if called when the socket is disconnected.
-int rudp_send(RUDP_Socket *sockfd, void *buffer, unsigned int buffer_size)
+int rudp_send(RUDP_Socket *rudp_socket, uint8_t flags, char *data, size_t data_size)
 {
-    if (!sockfd->isConnected)
+
+    RUDP_Packet packet;
+    packet.header.flags = flags;
+
+    if (flags == SYN || flags == SYN_ACK || flags == ACK || flags == FIN || flags == FIN_ACK)
     {
-        return -1;
+        // If SYN, SYN-ACK, ACK, FIN, or FIN-ACK flags are set, send packet with header only
+        packet.header.length = sizeof(RUDP_Header);
+        packet.header.sequence_number = 0;       // Set sequence number
+        packet.header.acknowledgment_number = 0; // Set appropriate acknowledgment number
+
+        if (sendto(rudp_socket->socket_fd, (const char *)&packet, sizeof(RUDP_Header), 0,
+                   (struct sockaddr *)&rudp_socket->dest_addr, (socklen_t)sizeof(rudp_socket->dest_addr)) == -1)
+        {
+            return -1; // Return -1 on failure
+        }
     }
-    int send_size = send(sockfd->socket_fd, buffer, buffer_size, 0);
-    if (send_size < 0)
+    else
     {
-        perror("send(2)");
-        return -1;
+        // If data packet, split data into chunks and send
+        size_t total_sent = 0;
+        int sequence_number = 0;
+        while (total_sent < data_size)
+        {
+            size_t remaining = data_size - total_sent;
+            size_t chunk_size = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
+
+            packet.header.length = sizeof(RUDP_Header) + chunk_size;
+            packet.header.sequence_number = sequence_number; // Set sequence number
+            packet.header.acknowledgment_number = 0;       // Set appropriate acknowledgment number
+            memcpy(packet.data, data + total_sent, chunk_size);
+            packet.header.checksum = calculate_checksum(packet.data, chunk_size);
+
+            // Send the packet
+            if (sendto(rudp_socket->socket_fd, (const char *)&packet, sizeof(RUDP_Header) + chunk_size, 0,
+                       (struct sockaddr *)&rudp_socket->dest_addr, (socklen_t)sizeof(rudp_socket->dest_addr)) == -1)
+            {
+                return -1; // Return -1 on failure
+            }
+
+            // print sent packet info
+            //printf("seq %d, len %d, chek %d\n", packet.header.sequence_number, packet.header.length, packet.header.checksum);
+
+            // Increment sequence number by the size of the chunk sent
+            sequence_number++;
+
+            total_sent += chunk_size;
+        }
     }
-    if (send_size == 0)
-    {
-        sockfd->isConnected = false;
-        return 0;
-    }
-    return send_size;
+
+    return data_size; // Return the size of the data sent on success
 }
 
 // Disconnects from an actively connected socket.
@@ -313,77 +395,42 @@ int rudp_disconnect(RUDP_Socket *sockfd)
 {
     if (!sockfd->isConnected)
     {
+        printf("Socket is already disconnected.\n");
         return 0;
     }
 
     if (!sockfd->isServer)
     {
-        // send fin ack
-        RUDP_Header header;
-        header.length = 0;
-        header.checksum = 0;
-        header.flags = 5;
-        RUDP_Packet packet;
-        packet.header = header;
-        if (sendto(sockfd->socket_fd, &packet, sizeof(packet), 0, (struct sockaddr *)&sockfd->dest_addr, sizeof(sockfd->dest_addr)) < 0)
+        // send fin
+        printf("Sending FIN packet.\n");
+        int sent = rudp_send(sockfd, FIN, NULL, 0);
+        if (sent == -1)
         {
-            perror("sendto(2)");
             return 0;
         }
 
         // receive fin ack
-        int recv_size = recv(sockfd->socket_fd, &packet, sizeof(packet), 0);
-        if (recv_size < 0)
+        RUDP_Packet packet;
+        int recv = rudp_receive(sockfd, &packet);
+        if (recv == -1)
         {
-            perror("recv(2)");
             return 0;
         }
-        if (packet.header.flags == 5)
+        if (packet.header.flags == FIN_ACK)
         {
+            printf("Received FIN-ACK packet.\n");
             sockfd->isConnected = false;
-            return 1;
         }
 
         // send ack
-        header.flags = 2;
-        packet.header = header;
-        if (sendto(sockfd->socket_fd, &packet, sizeof(packet), 0, (struct sockaddr *)&sockfd->dest_addr, sizeof(sockfd->dest_addr)) < 0)
+        printf("Sending ACK packet.\n");
+        sent = rudp_send(sockfd, ACK, NULL, 0);
+        if (sent == -1)
         {
-            perror("sendto(2)");
             return 0;
         }
     }
-    else
-    {
-        // send fin ack
-        RUDP_Header header;
-        header.length = 0;
-        header.checksum = 0;
-        header.flags = 5;
-        RUDP_Packet packet;
-        packet.header = header;
-        if (sendto(sockfd->socket_fd, &packet, sizeof(packet), 0, (struct sockaddr *)&sockfd->dest_addr, sizeof(sockfd->dest_addr)) < 0)
-        {
-            perror("sendto(2)");
-            return 0;
-        }
-
-        // receive ack
-        int recv_size = recv(sockfd->socket_fd, &packet, sizeof(packet), 0);
-        if (recv_size < 0)
-        {
-            perror("recv(2)");
-            return 0;
-        }
-        if (packet.header.flags == 2)
-        {
-            sockfd->isConnected = false;
-            return 1;
-        }
-    }
-
-    rudp_close(sockfd);
-    return 0;
+    return 1;
 }
 
 // This function releases all the memory allocation and resources of the socket.

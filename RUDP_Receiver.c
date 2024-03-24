@@ -40,118 +40,81 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    RUDP_Header header;
-    header.length = 0;
-    header.checksum = 0;
-    header.flags = 0;
-    RUDP_Packet packet;
-    packet.header = header;
-
-    // int recv = rudp_recv(sock, &packet, sizeof(packet));
-    // if (recv == -1)
-    // {
-    //     perror("rudp_recv(3)");
-    //     exit(EXIT_FAILURE);
-    // }
-
-    // // if received syn send back syn ack
-    // if (packet.header.flags == 1)
-    // {
-    //     packet.header.flags = 3;
-    //     if (rudp_send(sock, &packet, sizeof(packet)) == -1)
-    //     {
-    //         perror("rudp_send(3)");
-    //         exit(EXIT_FAILURE);
-    //     }
-    // }
-
-    // // receive ack
-    // recv = rudp_recv(sock, &packet, sizeof(packet));
-    // if (recv == -1)
-    // {
-    //     perror("rudp_recv(3)");
-    //     exit(EXIT_FAILURE);
-    // }
-
     FileStats *fileStats = NULL;
     int fileStatsCount = 0;
     double total_time_taken = 0;
     double total_bandwidth = 0;
 
+    RUDP_Packet packet;
     while (1)
     {
         clock_t start, end;
-        int total_bytes_received = 0;
+        
         // start clock
         start = clock();
-        while (1)
+        int recv_len = rudp_receive(sock, &packet);
+        if (recv_len == 0)
         {
-            int recv_len = rudp_recv(sock, &packet, sizeof(packet));
-            if (recv_len == 0)
-            {
-                fprintf(stdout, "Received FIN packet. Exiting...\n");
-                break;
-            }
-            else if (recv_len == -1)
-            {
-                perror("rudp_recv(3)");
-                exit(EXIT_FAILURE);
-            }
-            total_bytes_received += packet.header.length;
-
-            fprintf(stdout, "Received %d bytes\n", recv_len);
-
-            // send ack
-            packet.header.flags = 2;
-            if (rudp_send(sock, &packet, sizeof(packet)) == -1)
-            {
-                perror("rudp_send(3)");
-                exit(EXIT_FAILURE);
-            }
-            // Check if received_data contains the end-of-file marker
-            if (total_bytes_received == BUFFER_SIZE)
-            {
-                // Stop the clock
-                end = clock();
-
-                // measure the time in milliseconds taken to receive the file
-                double time_taken = ((double)(end - start)) / (CLOCKS_PER_SEC / 1000);
-                total_time_taken += time_taken;
-
-                // calculate the bandwidth in MB/s
-                double bandwidth = (BUFFER_SIZE / (time_taken / 1000)) / (1024 * 1024);
-                total_bandwidth += bandwidth;
-
-                fileStatsCount++;
-                fileStats = realloc(fileStats, fileStatsCount * sizeof(FileStats));
-                if (fileStats == NULL)
-                {
-                    perror("realloc(3)");
-                    rudp_disconnect(sock);
-                    rudp_close(sock);
-                    free(fileStats);
-                    exit(EXIT_FAILURE);
-                }
-                // store the file statistics
-                fileStats[fileStatsCount - 1].time_taken = time_taken;
-                fileStats[fileStatsCount - 1].bandwidth = bandwidth;
-                break;
-            }
-        }
-
-        // if received fin ack packet break
-        if (packet.header.flags == 5)
-        {
-            fprintf(stdout, "Sender sent FIN message.\n");
-            rudp_disconnect(sock);
-            rudp_close(sock);
+            printf("Received FIN packet. Exiting...\n");
             break;
         }
+        else if (recv_len == -1)
+        {
+            perror("rudp_recv(3)");
+            exit(EXIT_FAILURE);
+        }
+        end = clock();
 
-        fprintf(stdout, "File received. Bytes received: %d\n", total_bytes_received);
+        // send ack
+        int sent_len = rudp_send(sock, ACK, NULL, 0);
+        if (sent_len == -1)
+        {
+            perror("rudp_send(3)");
+            exit(EXIT_FAILURE);
+        }
+
+        // measure the time in milliseconds taken to receive the file
+        double time_taken = ((double)(end - start)) / (CLOCKS_PER_SEC / 1000);
+        total_time_taken += time_taken;
+
+        // calculate the bandwidth in MB/s
+        double bandwidth = (BUFFER_SIZE / (time_taken / 1000)) / (1024 * 1024);
+        total_bandwidth += bandwidth;
+
+        fileStatsCount++;
+        fileStats = realloc(fileStats, fileStatsCount * sizeof(FileStats));
+        if (fileStats == NULL)
+        {
+            perror("realloc(3)");
+            rudp_disconnect(sock);
+            rudp_close(sock);
+            free(fileStats);
+            exit(EXIT_FAILURE);
+        }
+        // store the file statistics
+        fileStats[fileStatsCount - 1].time_taken = time_taken;
+        fileStats[fileStatsCount - 1].bandwidth = bandwidth;
+
+        fprintf(stdout, "File received. Bytes received: %d\n", recv_len);
 
         fprintf(stdout, "Waiting for Sender response...\n");
     }
+
+    // send FIN-ACK
+    printf("Sending FIN-ACK...\n");
+    if (rudp_send(sock, FIN_ACK, NULL, 0) == -1)
+    {
+        perror("rudp_send(3)");
+        exit(EXIT_FAILURE);
+    }
+
+    // receive ACK
+    if (rudp_receive(sock, &packet) == -1)
+    {
+        perror("rudp_recv(3)");
+        exit(EXIT_FAILURE);
+    }
+    printf("Received ACK. Closing connection...\n");
 
     // Print the file statistics
     fprintf(stdout, "-----------------------\n");
@@ -172,5 +135,6 @@ int main(int argc, char *argv[])
     fprintf(stdout, "Receiver end\n");
     free(fileStats);
 
+    rudp_close(sock);
     return 0;
 }

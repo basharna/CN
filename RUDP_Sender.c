@@ -1,18 +1,5 @@
 #include "RUDP_API.c"
 
-#define BUFFER_SIZE 2 * 1024 * 1024
-
-/*
-0
-0
-0
-0 PUSH
-0
-0
-0 ACK
-0 SYN
-*/
-
 int main(int argc, char *argv[])
 {
 
@@ -69,6 +56,7 @@ int main(int argc, char *argv[])
     RUDP_Socket *sock = rudp_socket(false, server_port);
 
     fprintf(stdout, "Socket created.\n");
+    printf("isConnected: %d\n", sock->isConnected);
 
     // Connect to the receiver
     if (rudp_connect(sock, server_ip, server_port) == 0)
@@ -79,33 +67,20 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    fprintf(stdout, "Connected to the receiver.\n");
+    printf("isConnected: %d\n", sock->isConnected);
 
+    fprintf(stdout, "Connected to the receiver.\n");
 
     RUDP_Packet rec_packet;
 
     char decision;
     do
     {
-        // create a packet
-        RUDP_Packet packet;
-        packet.header.length = bytes_read;
-        packet.header.checksum = 0; // initialize checksum
-        // set flags to PUSH ACK
-        packet.header.flags = 18; // PUSH-ACK flag
 
-        // copy file data to packet
-        memcpy(packet.data, file_data, bytes_read);
-
-        // calculate checksum
-        uint16_t checksum = calculate_checksum(file_data, bytes_read);
-        packet.header.checksum = checksum;
-
-        // send the packet
-        int sent_bytes = rudp_send(sock, &packet, sizeof(packet));
-        if (sent_bytes < 0)
+        // send the file to the receiver
+        if (rudp_send(sock, PUSH, file_data, bytes_read) < 0)
         {
-            fprintf(stderr, "Failed to send the packet.\n");
+            fprintf(stderr, "Failed to send the file.\n");
             rudp_close(sock);
             free(file_data);
             exit(EXIT_FAILURE);
@@ -114,20 +89,26 @@ int main(int argc, char *argv[])
         fprintf(stdout, "File sent.\n");
 
         // receive response packet from the receiver
-        int received_bytes = rudp_recv(sock, &rec_packet, sizeof(rec_packet));
-        if (received_bytes < 0)
+        if (rudp_receive(sock, &rec_packet) < 0)
         {
-            fprintf(stderr, "Failed to receive the response packet.\n");
+            fprintf(stderr, "Failed to receive response packet.\n");
             rudp_close(sock);
             free(file_data);
             exit(EXIT_FAILURE);
         }
 
+        printf("do you want to send another file? (Y/N): ");
         scanf(" %c", &decision);
     } while (decision == 'Y' || decision == 'y');
 
     // disconnect from the receiver and close the socket
-    rudp_disconnect(sock);
+    int d = rudp_disconnect(sock);
+    if (d == 0){
+        fprintf(stderr, "Failed to disconnect from the receiver.\n");
+        return 1;
+    }
+    printf("Disconnected from %s:%d\n", inet_ntoa(sock->dest_addr.sin_addr), ntohs(sock->dest_addr.sin_port));
+    rudp_close(sock);
     free(file_data);
     return 0;
 }
