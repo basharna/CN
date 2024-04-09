@@ -56,7 +56,6 @@ int main(int argc, char *argv[])
     RUDP_Socket *sock = rudp_socket(false, server_port);
 
     fprintf(stdout, "Socket created.\n");
-    printf("isConnected: %d\n", sock->isConnected);
 
     // Connect to the receiver
     if (rudp_connect(sock, server_ip, server_port) == 0)
@@ -66,8 +65,6 @@ int main(int argc, char *argv[])
         free(file_data);
         exit(EXIT_FAILURE);
     }
-
-    printf("isConnected: %d\n", sock->isConnected);
 
     fprintf(stdout, "Connected to the receiver.\n");
 

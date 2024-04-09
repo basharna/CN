@@ -49,7 +49,7 @@ int main(int argc, char *argv[])
     while (1)
     {
         clock_t start, end;
-        
+
         // start clock
         start = clock();
         int recv_len = rudp_receive(sock, &packet);
@@ -72,7 +72,6 @@ int main(int argc, char *argv[])
             perror("rudp_send(3)");
             exit(EXIT_FAILURE);
         }
-
         // measure the time in milliseconds taken to receive the file
         double time_taken = ((double)(end - start)) / (CLOCKS_PER_SEC / 1000);
         total_time_taken += time_taken;

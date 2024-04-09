@@ -53,8 +53,8 @@ unsigned short int calculate_checksum(void *data, unsigned int bytes)
 // RUDP header
 typedef struct
 {
-    uint16_t length;
     uint32_t checksum;
+    uint16_t length;
     uint16_t sequence_number;
     uint16_t acknowledgment_number;
     uint8_t flags;
@@ -79,6 +79,7 @@ typedef struct
 int rudp_close(RUDP_Socket *);
 int rudp_send(RUDP_Socket *, uint8_t, char *, size_t);
 int rudp_receive(RUDP_Socket *, RUDP_Packet *);
+
 // Allocates a new structure for the RUDP socket (contains basic information about the socket itself).
 // Also creates a UDP socket as a baseline for the RUDP.
 // isServer means that this socket acts like a server. If set to server socket, it also binds the socket to a specific port.
@@ -257,7 +258,6 @@ int rudp_accept(RUDP_Socket *sockfd)
 
 // Receives data from the other side and put it into the buffer.
 // Returns the number of received bytes on success, 0 if got FIN packet (disconnect), and -1 on error.
-// Fails if called when the socket is disconnected.
 int rudp_receive(RUDP_Socket *rudp_socket, RUDP_Packet *packet)
 {
     size_t total_received = 0;
@@ -275,8 +275,6 @@ int rudp_receive(RUDP_Socket *rudp_socket, RUDP_Packet *packet)
                 perror("recvfrom");
                 return -1;
             }
-            // printf("Received %d \n", bytes_received);
-            // printf("sizeof(RUDP_header) %ld \n", sizeof(RUDP_Header));
 
             size_t data_size = bytes_received - sizeof(RUDP_Header);
 
@@ -289,7 +287,7 @@ int rudp_receive(RUDP_Socket *rudp_socket, RUDP_Packet *packet)
             {
                 return 0;
             }
-            else
+            else if (packet->header.flags == PUSH)
             {
                 // Check if the received packet is corrupted
                 unsigned short int checksum = calculate_checksum(packet->data, data_size);
@@ -332,8 +330,7 @@ int rudp_receive(RUDP_Socket *rudp_socket, RUDP_Packet *packet)
 }
 
 // Sends data stores in buffer to the other side.
-// Returns the number of sent bytes on success, 0 if got FIN packet (disconnect), and -1 on error.
-// Fails if called when the socket is disconnected.
+// Returns the number of sent bytes on success and -1 on error.
 int rudp_send(RUDP_Socket *rudp_socket, uint8_t flags, char *data, size_t data_size)
 {
 
@@ -346,6 +343,7 @@ int rudp_send(RUDP_Socket *rudp_socket, uint8_t flags, char *data, size_t data_s
         packet.header.length = sizeof(RUDP_Header);
         packet.header.sequence_number = 0;       // Set sequence number
         packet.header.acknowledgment_number = 0; // Set appropriate acknowledgment number
+        packet.header.checksum = 0;              // Set checksum to 0
 
         if (sendto(rudp_socket->socket_fd, (const char *)&packet, sizeof(RUDP_Header), 0,
                    (struct sockaddr *)&rudp_socket->dest_addr, (socklen_t)sizeof(rudp_socket->dest_addr)) == -1)
@@ -365,7 +363,7 @@ int rudp_send(RUDP_Socket *rudp_socket, uint8_t flags, char *data, size_t data_s
 
             packet.header.length = sizeof(RUDP_Header) + chunk_size;
             packet.header.sequence_number = sequence_number; // Set sequence number
-            packet.header.acknowledgment_number = 0;       // Set appropriate acknowledgment number
+            packet.header.acknowledgment_number = 0;         // Set appropriate acknowledgment number
             memcpy(packet.data, data + total_sent, chunk_size);
             packet.header.checksum = calculate_checksum(packet.data, chunk_size);
 
@@ -377,7 +375,7 @@ int rudp_send(RUDP_Socket *rudp_socket, uint8_t flags, char *data, size_t data_s
             }
 
             // print sent packet info
-            //printf("seq %d, len %d, chek %d\n", packet.header.sequence_number, packet.header.length, packet.header.checksum);
+            // printf("seq %d, len %d, chek %d\n", packet.header.sequence_number, packet.header.length, packet.header.checksum);
 
             // Increment sequence number by the size of the chunk sent
             sequence_number++;
@@ -420,6 +418,12 @@ int rudp_disconnect(RUDP_Socket *sockfd)
         {
             printf("Received FIN-ACK packet.\n");
             sockfd->isConnected = false;
+        }
+        else
+        {
+            printf("Received unexpected packet.\n");
+            printf("Received %d\n", packet.header.flags);
+            return 0;
         }
 
         // send ack
